@@ -10,6 +10,7 @@ const props = defineProps<{
   selectedZone: SelectableDnsZone | null;
   dnsNames: string[];
   dnsProviderName: string;
+  nsDelegation?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -20,7 +21,32 @@ const emit = defineEmits<{
 const recordName = ref('');
 const dnsNameError = ref('');
 
-const fullDnsName = computed(() => (props.selectedZone ? createManagedDnsName(recordName.value, props.selectedZone) || null : null));
+const parentDnsName = computed(() => props.selectedZone?.name.replace(/\.$/, '').replace(/^_acme-challenge\./i, '') ?? '');
+
+function requestedDnsName(input: string): string {
+  if (!props.selectedZone) {
+    return '';
+  }
+
+  if (!props.nsDelegation) {
+    return createManagedDnsName(input, props.selectedZone);
+  }
+
+  // The selected zone is _acme-challenge.example.org, but the certificate
+  // identifiers must be example.org and/or *.example.org.
+  const record = input.trim();
+  if (!record || record === '@') {
+    return parentDnsName.value;
+  }
+
+  if (record === '*') {
+    return `*.${parentDnsName.value}`;
+  }
+
+  return record;
+}
+
+const fullDnsName = computed(() => (props.selectedZone ? requestedDnsName(recordName.value) || null : null));
 
 watch(
   () => props.selectedZone,
@@ -46,7 +72,12 @@ function addDnsName(): void {
     return;
   }
 
-  const dnsNameValidation = readDnsNameInput(createManagedDnsName(recordName.value, props.selectedZone), 'DNS Name');
+  if (props.nsDelegation && !['@', '*', ''].includes(recordName.value.trim())) {
+    dnsNameError.value = 'Use @ for the parent domain or * for its wildcard.';
+    return;
+  }
+
+  const dnsNameValidation = readDnsNameInput(requestedDnsName(recordName.value), 'DNS Name');
 
   if (dnsNameValidation.message) {
     dnsNameError.value = dnsNameValidation.message;
@@ -74,13 +105,13 @@ function addDnsName(): void {
         id="managed-record-name"
         v-model="recordName"
         type="text"
-        placeholder="@, www, api, *"
+        :placeholder="nsDelegation ? '@ or *' : '@, www, api, *'"
         :disabled="!selectedZone"
         :aria-invalid="dnsNameError ? 'true' : 'false'"
         @keydown.enter.prevent="addDnsName"
         @input="clearDnsNameError"
       >
-      <span class="compound-input__suffix">.{{ selectedZone ? displayDnsName(selectedZone.name) : 'zone' }}</span>
+      <span class="compound-input__suffix">.{{ selectedZone ? displayDnsName(nsDelegation ? parentDnsName : selectedZone.name) : 'zone' }}</span>
       <button
         class="icon-button"
         type="button"

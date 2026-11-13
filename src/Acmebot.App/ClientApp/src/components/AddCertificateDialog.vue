@@ -9,7 +9,6 @@ import { createCertificateName, createDelegatedDnsAlias } from '@/utils/dnsNames
 import AdvancedCertificateOptions from './AdvancedCertificateOptions.vue';
 import DelegatedDnsNameEditor from './DelegatedDnsNameEditor.vue';
 import ManagedDnsNameEditor from './ManagedDnsNameEditor.vue';
-import NsDelegatedDnsNameEditor from './NsDelegatedDnsNameEditor.vue';
 import SearchableZoneSelect from './SearchableZoneSelect.vue';
 
 const props = defineProps<{
@@ -53,25 +52,23 @@ const issueModeOptions = {
     useSelectedZoneProvider: true,
     useGeneratedDnsAlias: true,
   },
-  nsDelegated: {
-    editor: NsDelegatedDnsNameEditor,
-    zoneLabel: 'NS-delegated challenge zone',
-    zoneStepLabel: 'Challenge zone',
-    emptyStatusLabel: 'Select zone',
-    useSelectedZoneProvider: true,
-    useGeneratedDnsAlias: false,
-  },
 } as const;
 
 type IssueMode = keyof typeof issueModeOptions;
 
 const selectedZone = ref<SelectableDnsZone | null>(null);
+const isNsChallengeZone = computed(() => {
+  const zone = selectedZone.value;
+  return zone?.dnsProviderName === 'Azure DNS' &&
+    zone.name.toLowerCase().replace(/\.$/, '').startsWith('_acme-challenge.');
+});
 
 const validKeySizes = [2048, 3072, 4096];
 const validKeyCurves: KeyCurveName[] = ['P-256', 'P-384', 'P-521', 'P-256K'];
 
 const form = reactive({
   issueMode: 'managed' as IssueMode,
+  useNsDelegation: false,
   dnsNames: [] as string[],
   dnsProviderName: '',
   useAdvancedOptions: false,
@@ -101,16 +98,6 @@ const submitValidationMessage = computed(() => {
     return 'Add at least one DNS name.';
   }
 
-  if (form.issueMode === 'nsDelegated') {
-    const zoneName = selectedZone.value?.name.replace(/\.$/, '').toLowerCase() ?? '';
-    if (!zoneName.startsWith('_acme-challenge.') || zoneName.length <= '_acme-challenge.'.length) {
-      return 'Select an existing _acme-challenge.<domain> DNS zone.';
-    }
-    const domain = zoneName.slice('_acme-challenge.'.length);
-    if (form.dnsNames.some((name) => name.toLowerCase() !== domain && name.toLowerCase() !== `*.${domain}`)) {
-      return `This zone can validate only ${domain} and *.${domain}.`;
-    }
-  }
   return certificateNameError.value || keyOptionError.value || tagError.value;
 });
 const canSubmit = computed(() => !props.sending && submitValidationMessage.value === '');
@@ -156,6 +143,7 @@ watch(
 watch(
   () => form.issueMode,
   () => {
+    form.useNsDelegation = false;
     form.dnsNames = [];
     form.dnsProviderName = activeIssueMode.value.useSelectedZoneProvider && selectedZone.value ? selectedZone.value.dnsProviderName : '';
   },
@@ -164,15 +152,21 @@ watch(
 watch(
   selectedZone,
   (zone) => {
-    if (form.issueMode === 'nsDelegated') {
-      // Clear names selected for the previous delegation.
-      form.dnsNames = [];
-    }
+    form.useNsDelegation = false;
     if (activeIssueMode.value.useSelectedZoneProvider) {
       form.dnsProviderName = zone?.dnsProviderName ?? '';
     } else if (form.dnsNames.length === 0) {
       form.dnsProviderName = '';
     }
+  },
+);
+
+watch(
+  () => form.useNsDelegation,
+  () => {
+    // Never mix regular DNS names with names targeting an NS-delegated zone.
+    form.dnsNames = [];
+    form.dnsProviderName = '';
   },
 );
 
@@ -194,6 +188,7 @@ watch(
 function resetForm(): void {
   selectedZone.value = null;
   form.issueMode = 'managed';
+  form.useNsDelegation = false;
   form.dnsNames = [];
   form.dnsProviderName = '';
   form.useAdvancedOptions = false;
@@ -449,13 +444,6 @@ function submit(): void {
                 >
                   CNAME alias
                 </button>
-                <button
-                  type="button"
-                  :class="{ 'is-selected': form.issueMode === 'nsDelegated' }"
-                  @click="form.issueMode = 'nsDelegated'"
-                >
-                  NS delegation
-                </button>
               </div>
             </div>
 
@@ -468,11 +456,32 @@ function submit(): void {
               />
             </div>
 
+            <div
+              v-if="form.issueMode === 'managed' && isNsChallengeZone"
+              class="form-section form-section--inline"
+            >
+              <label class="toggle-row">
+                <input
+                  v-model="form.useNsDelegation"
+                  type="checkbox"
+                >
+                <span>Use NS-delegated ACME challenge zone</span>
+              </label>
+              <p
+                v-if="form.useNsDelegation"
+                class="form-result"
+              >
+                The certificate will cover the parent domain and/or its wildcard.
+                TXT validation uses the selected Azure DNS challenge zone.
+              </p>
+            </div>
+
             <component
               :is="dnsNameEditorComponent"
               :selected-zone="selectedZone"
               :dns-names="form.dnsNames"
               :dns-provider-name="form.dnsProviderName"
+              :ns-delegation="form.issueMode === 'managed' && isNsChallengeZone && form.useNsDelegation"
               @add-dns-name="addDnsName"
               @remove-dns-name="removeDnsName"
             />
